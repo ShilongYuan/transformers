@@ -116,10 +116,16 @@ PRETRAINED_INIT_CONFIGURATION = {
 
 def load_vocab(vocab_file):
     """Loads a vocabulary file into a dictionary."""
+#   orderdict()：按输入顺序排列
     vocab = collections.OrderedDict()
+#     等价于reader=open(vocab_file,"r",encoding="utf-8")
+#          tokens = reader.readlines()
+# 其中r是模式，表示read，open的文件vocab_file是string类型，readlines()是将文件按行输出为列表
     with open(vocab_file, "r", encoding="utf-8") as reader:
         tokens = reader.readlines()
+#  index记录了顺序通过enumerate
     for index, token in enumerate(tokens):
+#       restrip("\n")删除了换行
         token = token.rstrip("\n")
         vocab[token] = index
     return vocab
@@ -127,9 +133,11 @@ def load_vocab(vocab_file):
 
 def whitespace_tokenize(text):
     """Runs basic whitespace cleaning and splitting on a piece of text."""
+#   删除首尾空格
     text = text.strip()
     if not text:
         return []
+#   按照空格进行分割
     tokens = text.split()
     return tokens
 
@@ -194,6 +202,7 @@ class BertTokenizer(PreTrainedTokenizer):
         mask_token="[MASK]",
         tokenize_chinese_chars=True,
         strip_accents=None,
+#       字典
         **kwargs
     ):
         super().__init__(
@@ -209,7 +218,7 @@ class BertTokenizer(PreTrainedTokenizer):
             strip_accents=strip_accents,
             **kwargs,
         )
-
+        # 判断是否为文件
         if not os.path.isfile(vocab_file):
             raise ValueError(
                 f"Can't find a vocabulary file at path '{vocab_file}'. To load the vocabulary from a Google pretrained"
@@ -219,6 +228,7 @@ class BertTokenizer(PreTrainedTokenizer):
         self.ids_to_tokens = collections.OrderedDict([(ids, tok) for tok, ids in self.vocab.items()])
         self.do_basic_tokenize = do_basic_tokenize
         if do_basic_tokenize:
+#           基于basictokenlizer的，可以做基本的按空格、标点分句子，统一大小写等操作
             self.basic_tokenizer = BasicTokenizer(
                 do_lower_case=do_lower_case,
                 never_split=never_split,
@@ -236,17 +246,20 @@ class BertTokenizer(PreTrainedTokenizer):
         return len(self.vocab)
 
     def get_vocab(self):
+#       dict函数创建一个字典，例：x=dict(x=4,y=5),print(x) out：{x=4,y=5}
         return dict(self.vocab, **self.added_tokens_encoder)
 
     def _tokenize(self, text):
         split_tokens = []
+        #判断是否做基本的tokenize 
         if self.do_basic_tokenize:
             for token in self.basic_tokenizer.tokenize(text, never_split=self.all_special_tokens):
 
-                # If the token is part of the never_split set
+                # If the token is part of the never_split set，直接添加到split_tokens[]中,else split by wordpiece
                 if token in self.basic_tokenizer.never_split:
                     split_tokens.append(token)
                 else:
+                    #  基于wordpiece的方法，将句子分成subsord，例如讲tokenizer分成token和后缀##izer，大大减少了vocab的空间
                     split_tokens += self.wordpiece_tokenizer.tokenize(token)
         else:
             split_tokens = self.wordpiece_tokenizer.tokenize(text)
@@ -264,7 +277,7 @@ class BertTokenizer(PreTrainedTokenizer):
         """Converts a sequence of tokens (string) in a single string."""
         out_string = " ".join(tokens).replace(" ##", "").strip()
         return out_string
-
+    # 定义函数参数后面的冒号是建议参数类型，后面的箭头是建议返回参数类型
     def build_inputs_with_special_tokens(
         self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
     ) -> List[int]:
@@ -349,6 +362,7 @@ class BertTokenizer(PreTrainedTokenizer):
 
     def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str]:
         index = 0
+#       判断是否为目录
         if os.path.isdir(save_directory):
             vocab_file = os.path.join(
                 save_directory, (filename_prefix + "-" if filename_prefix else "") + VOCAB_FILES_NAMES["vocab_file"]
