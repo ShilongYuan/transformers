@@ -182,7 +182,7 @@ def load_tf_weights_in_bert(model, config, tf_checkpoint_path):
         pointer.data = torch.from_numpy(array)
     return model
 
-
+# input由三个部分相加而得：position embedding + word embedding + segment embedding，然后经过norm和dropout得到embedding
 class BertEmbeddings(nn.Module):
     """Construct the embeddings from word, position and token_type embeddings."""
 
@@ -205,7 +205,7 @@ class BertEmbeddings(nn.Module):
                 torch.zeros(self.position_ids.size(), dtype=torch.long),
                 persistent=False,
             )
-
+# 前向传播过程
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -214,6 +214,7 @@ class BertEmbeddings(nn.Module):
         inputs_embeds: Optional[torch.FloatTensor] = None,
         past_key_values_length: int = 0,
     ) -> torch.Tensor:
+               
         if input_ids is not None:
             input_shape = input_ids.size()
         else:
@@ -243,11 +244,12 @@ class BertEmbeddings(nn.Module):
         if self.position_embedding_type == "absolute":
             position_embeddings = self.position_embeddings(position_ids)
             embeddings += position_embeddings
+        #layernorm和dropout都是为了更好的learning，防止梯度爆炸和梯度消失，nlp主要是layernorm             
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
         return embeddings
 
-
+# 简化就是一个公式，H_i=softmax(\frac{K_i*Q_i}{sqrt{d_i}})\times V_i
 class BertSelfAttention(nn.Module):
     def __init__(self, config, position_embedding_type=None):
         super().__init__()
@@ -260,7 +262,7 @@ class BertSelfAttention(nn.Module):
         self.num_attention_heads = config.num_attention_heads
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
-
+# nn.linear(input_size,output_size)
         self.query = nn.Linear(config.hidden_size, self.all_head_size)
         self.key = nn.Linear(config.hidden_size, self.all_head_size)
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
@@ -282,6 +284,7 @@ class BertSelfAttention(nn.Module):
 
     def forward(
         self,
+#       hidden_state是embedding
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.FloatTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
@@ -290,6 +293,7 @@ class BertSelfAttention(nn.Module):
         past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         output_attentions: Optional[bool] = False,
     ) -> Tuple[torch.Tensor]:
+#       计算q,k,v的维度，此处是指计算的query的，下面的else中计算了其他两个
         mixed_query_layer = self.query(hidden_states)
 
         # If this is instantiated as a cross-attention module, the keys
@@ -314,7 +318,7 @@ class BertSelfAttention(nn.Module):
         else:
             key_layer = self.transpose_for_scores(self.key(hidden_states))
             value_layer = self.transpose_for_scores(self.value(hidden_states))
-
+#       进行转置操作，并且拆成多个头输出
         query_layer = self.transpose_for_scores(mixed_query_layer)
 
         if self.is_decoder:
@@ -349,6 +353,7 @@ class BertSelfAttention(nn.Module):
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
         if attention_mask is not None:
             # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+#           这里为啥不是乘而是加？其实attention_mask已经不在是0，1的组合了，在bertmodel类中有调用一个extend的函数，将1改成了0.将0改成了一个较大的负数，这样相加再经过softmax就直接为零了
             attention_scores = attention_scores + attention_mask
 
         # Normalize the attention scores to probabilities.
@@ -363,18 +368,18 @@ class BertSelfAttention(nn.Module):
             attention_probs = attention_probs * head_mask
 
         context_layer = torch.matmul(attention_probs, value_layer)
-
+#       contiguos()函数是深拷贝，view前如果有浅拷贝的permute，transpose等函数要加contiguos。
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+#       丢弃最后两个维度，并且加上一个allheadsize的维度
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.view(new_context_layer_shape)
-
         outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
 
         if self.is_decoder:
             outputs = outputs + (past_key_value,)
         return outputs
 
-
+# 这里是selfattention后ffn前进行的操作
 class BertSelfOutput(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -385,24 +390,25 @@ class BertSelfOutput(nn.Module):
     def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
+#       这里进行了一个skip connect后再layernorm
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
 
-
+# 封装了selfattention和selfoutput
 class BertAttention(nn.Module):
     def __init__(self, config, position_embedding_type=None):
         super().__init__()
         self.self = BertSelfAttention(config, position_embedding_type=position_embedding_type)
         self.output = BertSelfOutput(config)
         self.pruned_heads = set()
-
+#   剪枝，找到可剪的head和他的index
     def prune_heads(self, heads):
         if len(heads) == 0:
             return
         heads, index = find_pruneable_heads_and_indices(
             heads, self.self.num_attention_heads, self.self.attention_head_size, self.pruned_heads
         )
-
+# 保存没有被剪枝的
         # Prune linear layers
         self.self.query = prune_linear_layer(self.self.query, index)
         self.self.key = prune_linear_layer(self.self.key, index)
@@ -437,7 +443,7 @@ class BertAttention(nn.Module):
         outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
         return outputs
 
-
+# 全连接层+非线性激活层
 class BertIntermediate(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -445,14 +451,17 @@ class BertIntermediate(nn.Module):
         if isinstance(config.hidden_act, str):
             self.intermediate_act_fn = ACT2FN[config.hidden_act]
         else:
+            # 如果无指定非线性激活函数，默认采用'gelu'
             self.intermediate_act_fn = config.hidden_act
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # 将输入执行一次全连接层操作，维度从embedding_size扩展为intermediate_size
         hidden_states = self.dense(hidden_states)
+        # 再执行一次非线性激活操作
         hidden_states = self.intermediate_act_fn(hidden_states)
         return hidden_states
 
-
+# 全连接层+dropout+layerNorm
 class BertOutput(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -461,12 +470,13 @@ class BertOutput(nn.Module):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
+        # 将输入执行一次全连接层操作，维度从intermediate_size变回embedding_size
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
 
-
+# 就是一个完整的bert层包括：attention+add&norm+ffn+add&norm
 class BertLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -494,6 +504,7 @@ class BertLayer(nn.Module):
     ) -> Tuple[torch.Tensor]:
         # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
+#       attention
         self_attention_outputs = self.attention(
             hidden_states,
             attention_mask,
@@ -502,7 +513,7 @@ class BertLayer(nn.Module):
             past_key_value=self_attn_past_key_value,
         )
         attention_output = self_attention_outputs[0]
-
+#       注意力在output的第一层
         # if decoder, the last output is tuple of self-attn cache
         if self.is_decoder:
             outputs = self_attention_outputs[1:-1]
@@ -511,31 +522,31 @@ class BertLayer(nn.Module):
             outputs = self_attention_outputs[1:]  # add self attentions if we output attention weights
 
         cross_attn_present_key_value = None
-        if self.is_decoder and encoder_hidden_states is not None:
-            if not hasattr(self, "crossattention"):
-                raise ValueError(
-                    f"If `encoder_hidden_states` are passed, {self} has to be instantiated with cross-attention layers"
-                    " by setting `config.add_cross_attention=True`"
-                )
+#         if self.is_decoder and encoder_hidden_states is not None:
+#             if not hasattr(self, "crossattention"):
+#                 raise ValueError(
+#                     f"If `encoder_hidden_states` are passed, {self} has to be instantiated with cross-attention layers"
+#                     " by setting `config.add_cross_attention=True`"
+#                 )
 
-            # cross_attn cached key/values tuple is at positions 3,4 of past_key_value tuple
-            cross_attn_past_key_value = past_key_value[-2:] if past_key_value is not None else None
-            cross_attention_outputs = self.crossattention(
-                attention_output,
-                attention_mask,
-                head_mask,
-                encoder_hidden_states,
-                encoder_attention_mask,
-                cross_attn_past_key_value,
-                output_attentions,
-            )
-            attention_output = cross_attention_outputs[0]
-            outputs = outputs + cross_attention_outputs[1:-1]  # add cross attentions if we output attention weights
+#             # cross_attn cached key/values tuple is at positions 3,4 of past_key_value tuple
+#             cross_attn_past_key_value = past_key_value[-2:] if past_key_value is not None else None
+#             cross_attention_outputs = self.crossattention(
+#                 attention_output,
+#                 attention_mask,
+#                 head_mask,
+#                 encoder_hidden_states,
+#                 encoder_attention_mask,
+#                 cross_attn_past_key_value,
+#                 output_attentions,
+#             )
+#             attention_output = cross_attention_outputs[0]
+#             outputs = outputs + cross_attention_outputs[1:-1]  # add cross attentions if we output attention weights
 
-            # add cross-attn cache to positions 3,4 of present_key_value tuple
-            cross_attn_present_key_value = cross_attention_outputs[-1]
-            present_key_value = present_key_value + cross_attn_present_key_value
-
+#             # add cross-attn cache to positions 3,4 of present_key_value tuple
+#             cross_attn_present_key_value = cross_attention_outputs[-1]
+#             present_key_value = present_key_value + cross_attn_present_key_value
+#       又是一个降存的方法
         layer_output = apply_chunking_to_forward(
             self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
         )
@@ -546,18 +557,20 @@ class BertLayer(nn.Module):
             outputs = outputs + (present_key_value,)
 
         return outputs
-
+#   ffn
     def feed_forward_chunk(self, attention_output):
         intermediate_output = self.intermediate(attention_output)
         layer_output = self.output(intermediate_output, attention_output)
         return layer_output
 
-
+# num_hidden_layers层的bertlayer
 class BertEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+#       self.layer是将bertlayer复制了num_huddien_layers次,a for _ in range()函数就是复制
         self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
+#       梯度检查点，内存不够时可使用，核心思想就是不储存现在不需要的数据，而是需要时重新计算，用时间换空间
         self.gradient_checkpointing = False
 
     def forward(
@@ -573,6 +586,7 @@ class BertEncoder(nn.Module):
         output_hidden_states: Optional[bool] = False,
         return_dict: Optional[bool] = True,
     ) -> Union[Tuple[torch.Tensor], BaseModelOutputWithPastAndCrossAttentions]:
+#       创建元组
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
         all_cross_attentions = () if output_attentions and self.config.add_cross_attention else None
@@ -621,11 +635,12 @@ class BertEncoder(nn.Module):
             hidden_states = layer_outputs[0]
             if use_cache:
                 next_decoder_cache += (layer_outputs[-1],)
+#           输出该层的attention
             if output_attentions:
                 all_self_attentions = all_self_attentions + (layer_outputs[1],)
                 if self.config.add_cross_attention:
                     all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
-
+#       添加最后一层的hidden_state
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
 
@@ -895,13 +910,13 @@ class BertModel(BertPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
-
+#   提取词向量部分
     def get_input_embeddings(self):
         return self.embeddings.word_embeddings
-
+#   为词向量赋值
     def set_input_embeddings(self, value):
         self.embeddings.word_embeddings = value
-
+#   剪注意力头
     def _prune_heads(self, heads_to_prune):
         """
         Prunes heads of the model. heads_to_prune: dict of {layer_num: list of heads to prune in this layer} See base
@@ -980,6 +995,7 @@ class BertModel(BertPreTrainedModel):
         past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
 
         if attention_mask is None:
+#           没有就都是1，乘后不变
             attention_mask = torch.ones(((batch_size, seq_length + past_key_values_length)), device=device)
 
         if token_type_ids is None:
